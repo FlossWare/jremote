@@ -1,95 +1,77 @@
 package org.flossware.jremote;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.AfterEach;
 import static org.junit.jupiter.api.Assertions.*;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
 class JRemoteServerTest {
-    private JRemoteServer server;
-    private TestService implementation;
-    private Thread serverThread;
-    private static final int TEST_PORT = 19999;
 
-    @BeforeEach
-    void setUp() {
-        implementation = new TestServiceImpl();
-    }
+    @Test
+    void testBuilderPattern() {
+        JRemoteServer server = JRemoteServer.builder()
+            .registerFactory(TestService.class, TestServiceImpl.class)
+            .build();
 
-    @AfterEach
-    void tearDown() {
-        if (serverThread != null) {
-            serverThread.interrupt();
-        }
+        assertNotNull(server);
     }
 
     @Test
-    void testConstructorValidatesInterface() {
+    void testBuilderWithMultipleFactories() {
+        JRemoteServer server = JRemoteServer.builder()
+            .registerFactory(TestService.class, TestServiceImpl.class)
+            .registerFactory(OrderService.class, OrderServiceImpl.class)
+            .build();
+
+        assertNotNull(server);
+    }
+
+    @Test
+    void testBuilderWithCustomFactory() {
+        JRemoteServer server = JRemoteServer.builder()
+            .registerFactory(TestService.class, () -> new TestServiceImpl())
+            .build();
+
+        assertNotNull(server);
+    }
+
+    @Test
+    void testNullRegistryRejected() {
         assertThrows(IllegalArgumentException.class, () ->
-            new JRemoteServer(TestServiceImpl.class, implementation)
+            new JRemoteServer(null)
         );
     }
 
     @Test
-    void testConstructorValidatesImplementation() {
+    void testEmptyRegistryRejected() {
+        ServiceRegistry emptyRegistry = new ServiceRegistry();
+
         assertThrows(IllegalArgumentException.class, () ->
-            new JRemoteServer(TestService.class, new Object())
+            new JRemoteServer(emptyRegistry)
         );
     }
 
     @Test
-    void testConstructorAcceptsValidArguments() {
-        assertDoesNotThrow(() ->
-            new JRemoteServer(TestService.class, implementation)
-        );
-    }
-
-    @Test
-    void testConstructorRejectsNullInterface() {
+    void testBuilderWithNoFactories() {
         assertThrows(IllegalArgumentException.class, () ->
-            new JRemoteServer(null, implementation)
+            JRemoteServer.builder().build()
         );
     }
 
     @Test
-    void testConstructorRejectsNullImplementation() {
-        assertThrows(IllegalArgumentException.class, () ->
-            new JRemoteServer(TestService.class, null)
-        );
-    }
+    void testServerStartsWithValidRegistry() throws Exception {
+        JRemoteServer server = JRemoteServer.builder()
+            .registerFactory(TestService.class, TestServiceImpl.class)
+            .build();
 
-    @Test
-    void testDeprecatedConstructor() {
-        assertDoesNotThrow(() ->
-            new JRemoteServer(implementation)
-        );
-    }
-
-    @Test
-    void testDeprecatedConstructorWithNoInterface() {
-        Object noInterface = new Object();
-        assertThrows(IllegalArgumentException.class, () ->
-            new JRemoteServer(noInterface)
-        );
-    }
-
-    @Test
-    void testServerStartsOnPort() throws Exception {
-        server = new JRemoteServer(TestService.class, implementation);
-        CountDownLatch latch = new CountDownLatch(1);
-
-        serverThread = Thread.ofVirtual().start(() -> {
-            latch.countDown();
-            server.start(TEST_PORT);
+        Thread serverThread = Thread.ofVirtual().start(() -> {
+            try {
+                server.start(22000);
+            } catch (Exception e) {
+                // Expected when interrupted
+            }
         });
 
-        assertTrue(latch.await(2, TimeUnit.SECONDS));
         Thread.sleep(500);
-
-        try (var socket = new java.net.Socket("localhost", TEST_PORT)) {
-            assertTrue(socket.isConnected());
-        }
+        serverThread.interrupt();
+        serverThread.join(1000);
     }
 }

@@ -4,7 +4,7 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
-public class RemoteException extends Exception {
+public class RemoteException extends RuntimeException {
     private final String originalExceptionType;
     private final String originalMessage;
     private final StackTraceElement[] originalStackTrace;

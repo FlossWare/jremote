@@ -10,16 +10,16 @@ import java.io.OutputStreamWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.lang.reflect.Method;
+import java.util.function.Supplier;
 
 /**
- * Server for hosting remote services.
- * Supports multiple services via ServiceRegistry and connection keep-alive.
+ * Server for hosting remote services via factory-based instance creation.
+ * Supports multiple instances per interface with connection keep-alive.
  */
 public class JRemoteServer {
     private static final Logger logger = LoggerFactory.getLogger(JRemoteServer.class);
     private static final ObjectMapper objectMapper = new ObjectMapper()
         .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-    private static final String DEFAULT_SERVICE_ID = "default";
 
     private final ServiceRegistry registry;
 
@@ -30,55 +30,16 @@ public class JRemoteServer {
         if (registry == null) {
             throw new IllegalArgumentException("ServiceRegistry cannot be null");
         }
-        if (registry.size() == 0) {
-            throw new IllegalArgumentException("ServiceRegistry must contain at least one service");
+        if (registry.factoryCount() == 0) {
+            throw new IllegalArgumentException("ServiceRegistry must contain at least one factory");
         }
 
         this.registry = registry;
-        logger.info("JRemoteServer initialized with {} service(s)", registry.size());
+        logger.info("JRemoteServer initialized with {} factory(ies)", registry.factoryCount());
     }
 
     /**
-     * Create server for a single service (backward compatibility).
-     * @deprecated Use {@link #builder()} for multi-service support or new JRemoteServer(registry) for single service.
-     */
-    @Deprecated
-    public JRemoteServer(Class<?> serviceInterface, Object implementation) {
-        logger.warn("Using deprecated constructor - consider using builder() for multi-service support");
-
-        ServiceRegistry singleServiceRegistry = new ServiceRegistry();
-        singleServiceRegistry.register(DEFAULT_SERVICE_ID, serviceInterface, implementation);
-        this.registry = singleServiceRegistry;
-
-        logger.info("JRemoteServer initialized for interface: {} (single-service mode)",
-                    serviceInterface.getName());
-    }
-
-    /**
-     * Create server with auto-detected interface (backward compatibility).
-     * @deprecated Use {@link #builder()} instead.
-     */
-    @Deprecated
-    public JRemoteServer(Object implementation) {
-        logger.warn("Using deprecated single-argument constructor - consider using builder()");
-
-        Class<?>[] interfaces = implementation.getClass().getInterfaces();
-        if (interfaces.length == 0) {
-            throw new IllegalArgumentException(
-                "Implementation must implement at least one interface when using " +
-                "single-argument constructor. Use JRemoteServer(Class<?>, Object) instead."
-            );
-        }
-
-        ServiceRegistry singleServiceRegistry = new ServiceRegistry();
-        singleServiceRegistry.register(DEFAULT_SERVICE_ID, interfaces[0], implementation);
-        this.registry = singleServiceRegistry;
-
-        logger.warn("Auto-detected interface: {}", interfaces[0].getName());
-    }
-
-    /**
-     * Create a builder for registering multiple services.
+     * Create a builder for registering service factories.
      */
     public static Builder builder() {
         return new Builder();
@@ -90,8 +51,8 @@ public class JRemoteServer {
      */
     public void start(int port) {
         try (ServerSocket serverSocket = new ServerSocket(port)) {
-            logger.info("JRemote Server started on port {} with {} service(s)",
-                       port, registry.size());
+            logger.info("jremote Server started on port {} with {} factory(ies)",
+                       port, registry.factoryCount());
 
             while (!Thread.currentThread().isInterrupted()) {
                 Socket client = serverSocket.accept();
@@ -108,6 +69,7 @@ public class JRemoteServer {
     private void handleConnection(Socket client) {
         BufferedWriter writer = null;
         BufferedReader reader = null;
+        String clientAddress = client.getRemoteSocketAddress().toString();
 
         try {
             reader = new BufferedReader(new InputStreamReader(client.getInputStream()));
@@ -117,11 +79,11 @@ public class JRemoteServer {
             while (!Thread.currentThread().isInterrupted()) {
                 String requestJson = reader.readLine();
                 if (requestJson == null) {
-                    logger.debug("Client closed connection");
+                    logger.debug("Client closed connection: {}", clientAddress);
                     break;
                 }
 
-                logger.debug("Received request: {}", requestJson);
+                logger.debug("Received request from {}: {}", clientAddress, requestJson);
 
                 try {
                     RemoteInvocation invocation = objectMapper.readValue(
@@ -132,13 +94,13 @@ public class JRemoteServer {
                     processInvocation(invocation, writer);
 
                 } catch (Exception e) {
-                    logger.error("Error processing request", e);
+                    logger.error("Error processing request from {}", clientAddress, e);
                     sendErrorResponse(writer, e);
                 }
             }
 
         } catch (Exception e) {
-            logger.error("Error handling connection", e);
+            logger.error("Error handling connection from {}", clientAddress, e);
         } finally {
             closeQuietly(reader);
             closeQuietly(writer);
@@ -147,11 +109,81 @@ public class JRemoteServer {
     }
 
     private void processInvocation(RemoteInvocation invocation, BufferedWriter writer) throws Exception {
-        // Get object ID (use default for backward compatibility)
+        switch (invocation.requestType()) {
+            case CREATE_INSTANCE -> handleCreateInstance(invocation, writer);
+            case DESTROY_INSTANCE -> handleDestroyInstance(invocation, writer);
+            case METHOD_CALL -> handleMethodCall(invocation, writer);
+        }
+    }
+
+    private void handleCreateInstance(RemoteInvocation invocation, BufferedWriter writer) throws Exception {
+        String interfaceName = invocation.interfaceClassName();
+        String clientId = invocation.objectId();  // Reused for clientId
+
+        try {
+            // Get constructor parameter types
+            Class<?>[] paramTypes = invocation.getParameterTypes();
+
+            // Create instance via registry
+            String objectId = registry.createInstance(
+                interfaceName,
+                clientId,
+                paramTypes,
+                invocation.args()
+            );
+
+            // Send success response with objectId
+            RemoteResponse response = RemoteResponse.success(objectId, String.class);
+            writer.write(objectMapper.writeValueAsString(response));
+            writer.newLine();
+            writer.flush();
+
+            logger.info("Created instance of {} with objectId {} for client {}",
+                       interfaceName, objectId, clientId);
+
+        } catch (Exception e) {
+            logger.error("Failed to create instance of {}", interfaceName, e);
+            sendErrorResponse(writer, e);
+        }
+    }
+
+    private void handleDestroyInstance(RemoteInvocation invocation, BufferedWriter writer) throws Exception {
+        String objectId = invocation.objectId();
+        String clientId = invocation.interfaceClassName();  // Reused for clientId
+
+        try {
+            registry.destroyInstance(objectId, clientId);
+
+            // Send success response
+            RemoteResponse response = RemoteResponse.success(null, Void.class);
+            writer.write(objectMapper.writeValueAsString(response));
+            writer.newLine();
+            writer.flush();
+
+            logger.info("Destroyed instance {} for client {}", objectId, clientId);
+
+        } catch (Exception e) {
+            logger.error("Failed to destroy instance {}", objectId, e);
+            sendErrorResponse(writer, e);
+        }
+    }
+
+    private void handleMethodCall(RemoteInvocation invocation, BufferedWriter writer) throws Exception {
+        // Get object ID
         String objectId = invocation.objectId();
         if (objectId == null || objectId.isBlank()) {
-            objectId = DEFAULT_SERVICE_ID;
-            logger.debug("No objectId provided, using default service");
+            logger.warn("METHOD_CALL with null/blank objectId");
+            RemoteResponse errorResponse = RemoteResponse.failure(
+                new RemoteException(
+                    "IllegalArgumentException",
+                    "Object ID cannot be null or blank",
+                    new StackTraceElement[0]
+                )
+            );
+            writer.write(objectMapper.writeValueAsString(errorResponse));
+            writer.newLine();
+            writer.flush();
+            return;
         }
 
         // Lookup service
@@ -240,25 +272,25 @@ public class JRemoteServer {
     }
 
     /**
-     * Builder for creating JRemoteServer with multiple services.
+     * Builder for creating JRemoteServer with service factories.
      */
     public static class Builder {
         private final ServiceRegistry registry = new ServiceRegistry();
 
         /**
-         * Register a service with a custom ID.
+         * Register a factory using reflection-based instantiation.
          */
-        public Builder register(String id, Class<?> serviceInterface, Object implementation) {
-            registry.register(id, serviceInterface, implementation);
+        public <T> Builder registerFactory(Class<T> interfaceClass, Class<? extends T> implClass) {
+            registry.registerFactory(interfaceClass, implClass);
             return this;
         }
 
         /**
-         * Register a service with an auto-generated ID.
-         * Returns the generated ID.
+         * Register a custom factory using a Supplier.
          */
-        public String registerWithGeneratedId(Class<?> serviceInterface, Object implementation) {
-            return registry.registerWithGeneratedId(serviceInterface, implementation);
+        public <T> Builder registerFactory(Class<T> interfaceClass, Supplier<T> factory) {
+            registry.registerFactory(interfaceClass, factory);
+            return this;
         }
 
         /**

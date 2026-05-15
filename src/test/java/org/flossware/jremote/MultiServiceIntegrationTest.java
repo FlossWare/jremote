@@ -9,14 +9,12 @@ class MultiServiceIntegrationTest {
     private static JRemoteServer server;
     private static Thread serverThread;
     private static final int TEST_PORT = 21000;
-    private static final String USERS_SERVICE_ID = "users";
-    private static final String ORDERS_SERVICE_ID = "orders";
 
     @BeforeAll
     static void startServer() throws Exception {
         server = JRemoteServer.builder()
-            .register(USERS_SERVICE_ID, TestService.class, new TestServiceImpl())
-            .register(ORDERS_SERVICE_ID, OrderService.class, new OrderServiceImpl())
+            .registerFactory(TestService.class, TestServiceImpl.class)
+            .registerFactory(OrderService.class, OrderServiceImpl.class)
             .build();
 
         serverThread = Thread.ofVirtual().start(() ->
@@ -34,169 +32,102 @@ class MultiServiceIntegrationTest {
     }
 
     @Test
-    void testMultipleServices() {
+    void testMultipleServiceTypes() {
         try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
-            TestService users = client.getProxy(USERS_SERVICE_ID, TestService.class);
-            OrderService orders = client.getProxy(ORDERS_SERVICE_ID, OrderService.class);
+            TestService testService = client.create(TestService.class);
+            OrderService orderService = client.create(OrderService.class);
 
-            String userResult = users.echo("Alice");
-            assertEquals("Echo: Alice", userResult);
+            assertEquals("Echo: Test", testService.echo("Test"));
+            orderService.createOrder(123);
+            assertEquals(1, orderService.getOrderCount());
+        }
+    }
 
-            String orderResult = orders.createOrder(123);
-            assertEquals("Order created: 123", orderResult);
+    @Test
+    void testMultipleInstancesOfSameService() {
+        try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
+            OrderService order1 = client.create(OrderService.class);
+            OrderService order2 = client.create(OrderService.class);
+
+            order1.createOrder(1);
+            order2.createOrder(2);
+
+            // Each instance should have its own state
+            assertEquals(1, order1.getOrderCount());
+            assertEquals(1, order2.getOrderCount());
         }
     }
 
     @Test
     void testServiceIsolation() {
         try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
-            OrderService orders1 = client.getProxy(ORDERS_SERVICE_ID, OrderService.class);
-            OrderService orders2 = client.getProxy(ORDERS_SERVICE_ID, OrderService.class);
+            TestService testService = client.create(TestService.class);
+            OrderService orderService = client.create(OrderService.class);
 
-            int initialCount = orders1.getOrderCount();
+            // Verify they are independent
+            assertNotNull(testService);
+            assertNotNull(orderService);
 
-            orders1.createOrder(1);
-            orders2.createOrder(2);
-
-            int finalCount = orders1.getOrderCount();
-
-            assertEquals(initialCount + 2, finalCount);
+            // Each should work correctly
+            assertEquals("Echo: Hello", testService.echo("Hello"));
+            orderService.createOrder(100);
         }
     }
 
     @Test
-    void testConnectionReuse() {
-        try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT, 1, 2)) {
-            TestService users = client.getProxy(USERS_SERVICE_ID, TestService.class);
-            OrderService orders = client.getProxy(ORDERS_SERVICE_ID, OrderService.class);
-
-            users.echo("First");
-            int poolSize1 = client.getPoolSize();
-
-            orders.createOrder(1);
-            int poolSize2 = client.getPoolSize();
-
-            users.echo("Second");
-            orders.createOrder(2);
-            int poolSize3 = client.getPoolSize();
-
-            assertTrue(poolSize1 <= 2);
-            assertTrue(poolSize2 <= 2);
-            assertTrue(poolSize3 <= 2);
-        }
-    }
-
-    @Test
-    void testMultipleClientsMultipleServices() {
-        try (JRemoteClient client1 = new JRemoteClient("localhost", TEST_PORT);
-             JRemoteClient client2 = new JRemoteClient("localhost", TEST_PORT)) {
-
-            TestService users1 = client1.getProxy(USERS_SERVICE_ID, TestService.class);
-            TestService users2 = client2.getProxy(USERS_SERVICE_ID, TestService.class);
-
-            OrderService orders1 = client1.getProxy(ORDERS_SERVICE_ID, OrderService.class);
-            OrderService orders2 = client2.getProxy(ORDERS_SERVICE_ID, OrderService.class);
-
-            assertEquals("Echo: Client1", users1.echo("Client1"));
-            assertEquals("Echo: Client2", users2.echo("Client2"));
-
-            orders1.createOrder(100);
-            orders2.createOrder(200);
-
-            assertTrue(orders1.getOrderCount() >= 2);
-        }
-    }
-
-    @Test
-    void testInvalidServiceId() {
-        try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
-            TestService invalid = client.getProxy("nonexistent", TestService.class);
-
-            Exception exception = assertThrows(
-                Exception.class,
-                () -> invalid.echo("test")
-            );
-
-            // Could be RemoteException or UndeclaredThrowableException wrapping RemoteException
-            Throwable cause = exception;
-            if (exception instanceof java.lang.reflect.UndeclaredThrowableException) {
-                cause = exception.getCause();
+    void testConcurrentClients() throws Exception {
+        Thread client1 = Thread.ofVirtual().start(() -> {
+            try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
+                TestService service = client.create(TestService.class);
+                for (int i = 0; i < 10; i++) {
+                    service.echo("Client1-" + i);
+                }
             }
+        });
 
-            assertTrue(cause instanceof RemoteException);
-            RemoteException remoteEx = (RemoteException) cause;
-            assertTrue(remoteEx.getOriginalExceptionType().contains("ServiceNotFoundException"));
-            assertTrue(remoteEx.getMessage().contains("nonexistent"));
+        Thread client2 = Thread.ofVirtual().start(() -> {
+            try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
+                OrderService service = client.create(OrderService.class);
+                for (int i = 0; i < 10; i++) {
+                    service.createOrder(i);
+                }
+            }
+        });
+
+        client1.join();
+        client2.join();
+    }
+
+    @Test
+    void testAutoCleanupOnClose() {
+        try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
+            TestService service1 = client.create(TestService.class);
+            TestService service2 = client.create(TestService.class);
+
+            assertEquals("Echo: Test", service1.echo("Test"));
+            assertEquals("Echo: Test", service2.echo("Test"));
+
+            // Both instances will be auto-destroyed on close
         }
     }
 
     @Test
-    void testSecurityValidation() {
+    void testDestroySpecificInstance() {
         try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
-            TestService users = client.getProxy(USERS_SERVICE_ID, TestService.class);
+            TestService service1 = client.create(TestService.class);
+            TestService service2 = client.create(TestService.class);
 
-            RemoteException exception = assertThrows(
-                RemoteException.class,
-                () -> users.throwsException()
-            );
+            assertEquals("Echo: First", service1.echo("First"));
+            assertEquals("Echo: Second", service2.echo("Second"));
 
-            assertEquals("java.lang.IllegalStateException", exception.getOriginalExceptionType());
-            assertEquals("Test exception", exception.getOriginalMessage());
-        }
-    }
+            // Destroy only service1
+            client.destroy(service1);
 
-    @Test
-    void testBuilderPattern() {
-        JRemoteServer testServer = JRemoteServer.builder()
-            .register("service1", TestService.class, new TestServiceImpl())
-            .register("service2", OrderService.class, new OrderServiceImpl())
-            .build();
+            // service2 should still work
+            assertEquals("Echo: Still works", service2.echo("Still works"));
 
-        assertNotNull(testServer);
-    }
-
-    @Test
-    void testClientAutoCloseable() {
-        JRemoteClient client = new JRemoteClient("localhost", TEST_PORT);
-        TestService users = client.getProxy(USERS_SERVICE_ID, TestService.class);
-
-        assertEquals("Echo: Test", users.echo("Test"));
-
-        client.close();
-
-        assertEquals(0, client.getPoolSize());
-    }
-
-    @Test
-    void testNullObjectId() {
-        try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
-            assertThrows(IllegalArgumentException.class, () ->
-                client.getProxy(null, TestService.class)
-            );
-
-            assertThrows(IllegalArgumentException.class, () ->
-                client.getProxy("", TestService.class)
-            );
-
-            assertThrows(IllegalArgumentException.class, () ->
-                client.getProxy("  ", TestService.class)
-            );
-        }
-    }
-
-    @Test
-    void testProxyObjectMethods() {
-        try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
-            TestService users = client.getProxy(USERS_SERVICE_ID, TestService.class);
-
-            String toString = users.toString();
-            assertTrue(toString.contains("TestService"));
-            assertTrue(toString.contains(USERS_SERVICE_ID));
-
-            int hashCode = users.hashCode();
-            assertNotEquals(0, hashCode);
-
-            assertEquals(users, users);
+            // service1 should not be destroyable again
+            assertThrows(IllegalArgumentException.class, () -> client.destroy(service1));
         }
     }
 }

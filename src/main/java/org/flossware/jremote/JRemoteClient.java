@@ -3,16 +3,25 @@ package org.flossware.jremote;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.net.Socket;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Client for invoking remote services.
- * Supports both connection pooling (instance API) and single-use connections (deprecated static API).
+ * Client for invoking remote services via dynamic proxies.
+ * Supports factory-based instance creation with connection pooling.
  */
 public class JRemoteClient implements AutoCloseable {
     private static final Logger logger = LoggerFactory.getLogger(JRemoteClient.class);
@@ -20,237 +29,359 @@ public class JRemoteClient implements AutoCloseable {
         .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     private final ConnectionPool connectionPool;
+    private final String clientId;
+    private final Map<Object, String> proxyToObjectId;
+    private volatile boolean closed = false;
 
     /**
-     * Create a client with connection pooling (default pool size).
+     * Create client with default connection pool (min=1, max=10).
      */
     public JRemoteClient(String host, int port) {
-        this.connectionPool = new ConnectionPool(host, port);
-        logger.info("Created JRemoteClient with connection pooling for {}:{}", host, port);
+        this(host, port, 1, 10);
     }
 
     /**
-     * Create a client with connection pooling (custom pool size).
+     * Create client with custom connection pool configuration.
      */
     public JRemoteClient(String host, int port, int minConnections, int maxConnections) {
         this.connectionPool = new ConnectionPool(host, port, minConnections, maxConnections);
-        logger.info("Created JRemoteClient with connection pooling for {}:{} (min={}, max={})",
-            host, port, minConnections, maxConnections);
+        this.clientId = UUID.randomUUID().toString();
+        this.proxyToObjectId = new ConcurrentHashMap<>();
+
+        logger.info("JRemoteClient created for {}:{} (clientId: {})",
+                   host, port, clientId);
     }
 
     /**
-     * Get a proxy for a remote service identified by objectId.
+     * Create a new remote instance using no-arg constructor.
      */
-    @SuppressWarnings("unchecked")
-    public <T> T getProxy(String objectId, Class<T> interfaceClass) {
-        if (objectId == null || objectId.isBlank()) {
-            throw new IllegalArgumentException("objectId cannot be null or blank");
+    public <T> T create(Class<T> interfaceClass) {
+        return create(interfaceClass, new Object[0]);
+    }
+
+    /**
+     * Create a new remote instance with constructor arguments.
+     */
+    public <T> T create(Class<T> interfaceClass, Object... args) {
+        if (closed) {
+            throw new IllegalStateException("Client is closed");
         }
         if (interfaceClass == null) {
-            throw new IllegalArgumentException("interfaceClass cannot be null");
+            throw new IllegalArgumentException("Interface class cannot be null");
+        }
+        if (!interfaceClass.isInterface()) {
+            throw new IllegalArgumentException(
+                interfaceClass.getName() + " is not an interface");
         }
 
-        logger.debug("Creating proxy for service '{}' with interface {}",
-            objectId, interfaceClass.getName());
+        Socket socket = null;
+        try {
+            socket = connectionPool.acquire();
+            var writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+            var reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
 
-        return (T) Proxy.newProxyInstance(
-            interfaceClass.getClassLoader(),
-            new Class<?>[]{interfaceClass},
-            (proxy, method, args) -> {
-                if (method.getDeclaringClass() == Object.class) {
-                    return switch (method.getName()) {
-                        case "toString" ->
-                            interfaceClass.getName() + "@" + objectId;
-                        case "hashCode" ->
-                            (interfaceClass.getName() + objectId).hashCode();
-                        case "equals" -> proxy == args[0];
-                        default -> null;
-                    };
-                }
-
-                Socket socket = null;
-                try {
-                    socket = connectionPool.acquire();
-
-                    var writer = new BufferedWriter(
-                        new OutputStreamWriter(socket.getOutputStream()));
-                    var reader = new BufferedReader(
-                        new InputStreamReader(socket.getInputStream()));
-
-                    RemoteInvocation invocation = new RemoteInvocation(
-                        objectId,
-                        method.getName(),
-                        method.getParameterTypes(),
-                        args
-                    );
-
-                    String requestJson = objectMapper.writeValueAsString(invocation);
-                    logger.debug("Sending request to {}: {}", objectId, requestJson);
-
-                    writer.write(requestJson);
-                    writer.newLine();
-                    writer.flush();
-
-                    String responseJson = reader.readLine();
-                    if (responseJson == null) {
-                        throw new RemoteException(
-                            "ConnectionException",
-                            "Server closed connection",
-                            new StackTraceElement[0]
-                        );
-                    }
-
-                    logger.debug("Received response: {}", responseJson);
-
-                    RemoteResponse response = objectMapper.readValue(
-                        responseJson,
-                        RemoteResponse.class
-                    );
-
-                    if (response.isSuccess()) {
-                        Object result = response.result();
-
-                        Class<?> returnType = method.getReturnType();
-                        if (result == null || returnType.isInstance(result)) {
-                            return result;
-                        }
-
-                        return objectMapper.convertValue(result, returnType);
-                    } else {
-                        throw response.error();
-                    }
-
-                } catch (RemoteException e) {
-                    logger.error("Remote method invocation failed for {}", objectId, e);
-                    // Connection may be bad, don't return to pool
-                    if (socket != null) {
-                        try {
-                            socket.close();
-                        } catch (Exception ignore) {}
-                        socket = null;
-                    }
-                    throw e;
-                } catch (Exception e) {
-                    logger.error("Client communication error for {}", objectId, e);
-                    // Connection may be bad, don't return to pool
-                    if (socket != null) {
-                        try {
-                            socket.close();
-                        } catch (Exception ignore) {}
-                        socket = null;
-                    }
-                    throw new RemoteException(
-                        e.getClass().getName(),
-                        e.getMessage(),
-                        e.getStackTrace()
-                    );
-                } finally {
-                    if (socket != null) {
-                        connectionPool.release(socket);
-                    }
-                }
+            // Determine constructor parameter types
+            Class<?>[] paramTypes = null;
+            if (args != null && args.length > 0) {
+                paramTypes = Arrays.stream(args)
+                    .map(arg -> arg == null ? Object.class : arg.getClass())
+                    .toArray(Class<?>[]::new);
             }
-        );
+
+            // Send CREATE_INSTANCE request
+            RemoteInvocation createRequest = RemoteInvocation.createInstance(
+                clientId,
+                interfaceClass.getName(),
+                paramTypes,
+                args
+            );
+
+            String requestJson = objectMapper.writeValueAsString(createRequest);
+            logger.debug("Sending CREATE_INSTANCE request: {}", requestJson);
+
+            writer.write(requestJson);
+            writer.newLine();
+            writer.flush();
+
+            // Receive objectId response
+            String responseJson = reader.readLine();
+            if (responseJson == null) {
+                throw new RemoteException(
+                    "ConnectionException",
+                    "Connection closed while creating instance",
+                    new StackTraceElement[0]
+                );
+            }
+
+            logger.debug("Received response: {}", responseJson);
+
+            RemoteResponse response = objectMapper.readValue(responseJson, RemoteResponse.class);
+
+            if (!response.isSuccess()) {
+                throw response.error();
+            }
+
+            String objectId = (String) response.result();
+
+            // Create proxy with this objectId
+            T proxy = createProxy(objectId, interfaceClass);
+
+            // Track for cleanup
+            proxyToObjectId.put(proxy, objectId);
+
+            logger.info("Created remote instance of {} with objectId {}",
+                       interfaceClass.getName(), objectId);
+
+            return proxy;
+
+        } catch (RemoteException e) {
+            logger.error("Remote exception while creating instance", e);
+            if (socket != null) {
+                closeQuietly(socket);
+                socket = null;  // Don't return to pool
+            }
+            throw e;
+        } catch (Exception e) {
+            logger.error("Error creating remote instance", e);
+            if (socket != null) {
+                closeQuietly(socket);
+                socket = null;  // Don't return to pool
+            }
+            throw new RemoteException(
+                e.getClass().getName(),
+                "Failed to create remote instance: " + e.getMessage(),
+                e.getStackTrace()
+            );
+        } finally {
+            if (socket != null) {
+                connectionPool.release(socket);
+            }
+        }
     }
 
     /**
-     * Close the connection pool and all connections.
+     * Destroy a remote instance.
+     * The proxy should not be used after this call.
+     */
+    public void destroy(Object proxy) {
+        if (closed) {
+            logger.warn("Attempting to destroy proxy after client closed");
+            return;
+        }
+
+        String objectId = proxyToObjectId.remove(proxy);
+        if (objectId == null) {
+            throw new IllegalArgumentException(
+                "Proxy not managed by this client or already destroyed");
+        }
+
+        Socket socket = null;
+        try {
+            socket = connectionPool.acquire();
+            var writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+            var reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+
+            // Send DESTROY_INSTANCE request
+            RemoteInvocation destroyRequest = RemoteInvocation.destroyInstance(clientId, objectId);
+
+            String requestJson = objectMapper.writeValueAsString(destroyRequest);
+            logger.debug("Sending DESTROY_INSTANCE request: {}", requestJson);
+
+            writer.write(requestJson);
+            writer.newLine();
+            writer.flush();
+
+            // Read response
+            String responseJson = reader.readLine();
+            if (responseJson != null) {
+                RemoteResponse response = objectMapper.readValue(responseJson, RemoteResponse.class);
+                if (!response.isSuccess()) {
+                    logger.warn("Failed to destroy instance {}: {}",
+                               objectId, response.error().getMessage());
+                }
+            }
+
+            logger.info("Destroyed remote instance {}", objectId);
+
+        } catch (Exception e) {
+            logger.warn("Error destroying instance " + objectId, e);
+            if (socket != null) {
+                closeQuietly(socket);
+                socket = null;
+            }
+        } finally {
+            if (socket != null) {
+                connectionPool.release(socket);
+            }
+        }
+    }
+
+    /**
+     * Close the client and destroy all remote instances.
      */
     @Override
     public void close() {
+        if (closed) {
+            return;
+        }
+
+        closed = true;
+        logger.info("Closing JRemoteClient (clientId: {})", clientId);
+
+        // Destroy all tracked instances
+        Set<String> instanceIds = new HashSet<>(proxyToObjectId.values());
+        for (String objectId : instanceIds) {
+            try {
+                Socket socket = connectionPool.acquire();
+                var writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+
+                RemoteInvocation destroyRequest = RemoteInvocation.destroyInstance(clientId, objectId);
+                String requestJson = objectMapper.writeValueAsString(destroyRequest);
+
+                writer.write(requestJson);
+                writer.newLine();
+                writer.flush();
+
+                connectionPool.release(socket);
+
+                logger.debug("Destroyed instance {} during close", objectId);
+
+            } catch (Exception e) {
+                logger.warn("Failed to destroy instance " + objectId + " during close", e);
+            }
+        }
+
+        proxyToObjectId.clear();
         connectionPool.close();
+
+        logger.info("JRemoteClient closed");
     }
 
     /**
-     * Get the connection pool size.
+     * Create a dynamic proxy for a remote service instance.
      */
-    public int getPoolSize() {
-        return connectionPool.size();
-    }
+    private <T> T createProxy(String objectId, Class<T> interfaceClass) {
+        InvocationHandler handler = new RemoteInvocationHandler(objectId, interfaceClass);
 
-    /**
-     * Get the number of available connections.
-     */
-    public int getAvailableConnections() {
-        return connectionPool.available();
-    }
-
-    /**
-     * Create a proxy for a remote service (single-use connection, no pooling).
-     * @deprecated Use the instance-based API with {@link #JRemoteClient(String, int)} and {@link #getProxy(String, Class)} instead.
-     */
-    @Deprecated
-    @SuppressWarnings("unchecked")
-    public static <T> T create(Class<T> interfaceClass, String host, int port) {
-        logger.warn("Using deprecated static create() method - consider using instance-based API with connection pooling");
-
-        return (T) Proxy.newProxyInstance(
+        @SuppressWarnings("unchecked")
+        T proxy = (T) Proxy.newProxyInstance(
             interfaceClass.getClassLoader(),
-            new Class<?>[]{interfaceClass},
-            (proxy, method, args) -> {
-                if (method.getDeclaringClass() == Object.class) {
-                    return switch (method.getName()) {
-                        case "toString" ->
-                            interfaceClass.getName() + "@" + host + ":" + port;
-                        case "hashCode" ->
-                            (interfaceClass.getName() + host + port).hashCode();
-                        case "equals" -> proxy == args[0];
-                        default -> null;
-                    };
+            new Class<?>[] { interfaceClass },
+            handler
+        );
+
+        return proxy;
+    }
+
+    /**
+     * InvocationHandler for proxying method calls to remote service.
+     */
+    private class RemoteInvocationHandler implements InvocationHandler {
+        private final String objectId;
+        private final Class<?> interfaceClass;
+
+        public RemoteInvocationHandler(String objectId, Class<?> interfaceClass) {
+            this.objectId = objectId;
+            this.interfaceClass = interfaceClass;
+        }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+            // Handle Object methods locally
+            if (method.getDeclaringClass() == Object.class) {
+                return handleObjectMethod(proxy, method, args);
+            }
+
+            Socket socket = null;
+            try {
+                socket = connectionPool.acquire();
+                var writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+                var reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+
+                // Create method call request
+                RemoteInvocation invocation = RemoteInvocation.methodCall(
+                    objectId,
+                    method.getName(),
+                    method.getParameterTypes(),
+                    args
+                );
+
+                String requestJson = objectMapper.writeValueAsString(invocation);
+                logger.debug("Sending method call: {}", requestJson);
+
+                writer.write(requestJson);
+                writer.newLine();
+                writer.flush();
+
+                // Read response
+                String responseJson = reader.readLine();
+                if (responseJson == null) {
+                    throw new RemoteException(
+                        "ConnectionException",
+                        "Connection closed by server",
+                        new StackTraceElement[0]
+                    );
                 }
 
-                try (Socket socket = new Socket(host, port);
-                     var writer = new BufferedWriter(
-                         new OutputStreamWriter(socket.getOutputStream()));
-                     var reader = new BufferedReader(
-                         new InputStreamReader(socket.getInputStream()))) {
+                logger.debug("Received response: {}", responseJson);
 
-                    RemoteInvocation invocation = new RemoteInvocation(
-                        method.getName(),
-                        method.getParameterTypes(),
-                        args
-                    );
+                RemoteResponse response = objectMapper.readValue(responseJson, RemoteResponse.class);
 
-                    String requestJson = objectMapper.writeValueAsString(invocation);
-                    logger.debug("Sending request: {}", requestJson);
+                if (response.isSuccess()) {
+                    return response.result();
+                } else {
+                    throw response.error();
+                }
 
-                    writer.write(requestJson);
-                    writer.newLine();
-                    writer.flush();
-
-                    String responseJson = reader.readLine();
-                    logger.debug("Received response: {}", responseJson);
-
-                    RemoteResponse response = objectMapper.readValue(
-                        responseJson,
-                        RemoteResponse.class
-                    );
-
-                    if (response.isSuccess()) {
-                        Object result = response.result();
-
-                        Class<?> returnType = method.getReturnType();
-                        if (result == null || returnType.isInstance(result)) {
-                            return result;
-                        }
-
-                        return objectMapper.convertValue(result, returnType);
-                    } else {
-                        throw response.error();
-                    }
-
-                } catch (RemoteException e) {
-                    logger.error("Remote method invocation failed", e);
-                    throw e;
-                } catch (Exception e) {
-                    logger.error("Client communication error", e);
-                    throw new RemoteException(
-                        e.getClass().getName(),
-                        e.getMessage(),
-                        e.getStackTrace()
-                    );
+            } catch (RemoteException e) {
+                logger.error("Remote exception during method call: {}", method.getName(), e);
+                if (socket != null) {
+                    closeQuietly(socket);
+                    socket = null;
+                }
+                throw e;
+            } catch (Exception e) {
+                logger.error("Error during remote method call: {}", method.getName(), e);
+                if (socket != null) {
+                    closeQuietly(socket);
+                    socket = null;
+                }
+                throw new RemoteException(
+                    e.getClass().getName(),
+                    e.getMessage(),
+                    e.getStackTrace()
+                );
+            } finally {
+                if (socket != null) {
+                    connectionPool.release(socket);
                 }
             }
-        );
+        }
+
+        private Object handleObjectMethod(Object proxy, Method method, Object[] args) {
+            return switch (method.getName()) {
+                case "toString" -> String.format(
+                    "%s proxy [objectId=%s, clientId=%s]",
+                    interfaceClass.getSimpleName(),
+                    objectId,
+                    clientId
+                );
+                case "hashCode" -> System.identityHashCode(proxy);
+                case "equals" -> proxy == args[0];
+                default -> throw new UnsupportedOperationException(
+                    "Unsupported Object method: " + method.getName()
+                );
+            };
+        }
+    }
+
+    private void closeQuietly(Socket socket) {
+        if (socket != null) {
+            try {
+                socket.close();
+            } catch (Exception e) {
+                logger.debug("Error closing socket", e);
+            }
+        }
     }
 }

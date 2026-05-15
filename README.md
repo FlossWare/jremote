@@ -1,16 +1,17 @@
 # jremote
 
-A production-ready Java 21 Universal Remote Invocation framework with multi-service support and connection pooling. Built on Virtual Threads for high-scalability distributed computing.
+A production-ready Java 21 Remote Procedure Call framework with factory-based instance creation and connection pooling. Built on Virtual Threads for high-scalability distributed computing.
 
 ## Features
 
 ### Core Capabilities
-- ✅ **Multi-Service Support**: Host multiple service objects on a single server
+- ✅ **Factory-Based Instances**: Create remote instances like `new Foo()` - no string IDs
 - ✅ **Connection Pooling**: Efficient connection reuse with configurable pool sizes
 - ✅ **Project Loom**: Virtual Threads handle thousands of concurrent calls
 - ✅ **Generic Proxying**: Dynamically proxy any Java interface at runtime
 - ✅ **Type-Safe**: Full compile-time type safety with generics
 - ✅ **Keep-Alive**: Persistent connections for reduced latency
+- ✅ **Constructor Arguments**: Support for parameterized constructors
 
 ### Security & Reliability
 - ✅ **Interface Validation**: Only methods declared in service interfaces can be invoked
@@ -18,12 +19,12 @@ A production-ready Java 21 Universal Remote Invocation framework with multi-serv
 - ✅ **Error Handling**: Comprehensive exception propagation with stack traces
 - ✅ **Logging**: SLF4J + Logback for production observability
 - ✅ **Thread-Safe**: Concurrent access supported via ConcurrentHashMap and BlockingQueue
+- ✅ **Instance Ownership**: Clients can only destroy their own instances
 
 ### Development Experience
-- ✅ **Builder Pattern**: Fluent API for service registration
-- ✅ **Auto-Closeable**: try-with-resources support
-- ✅ **Backward Compatible**: Deprecated APIs still functional
-- ✅ **Comprehensive Tests**: 56 tests with 100% pass rate
+- ✅ **Intuitive API**: Works like `new Foo()` instead of string-based lookup
+- ✅ **Auto-Closeable**: try-with-resources support with automatic cleanup
+- ✅ **Comprehensive Tests**: 60 tests with 100% pass rate
 - ✅ **CI/CD Ready**: Automated versioning and deployment
 
 ## Quick Start
@@ -61,13 +62,11 @@ public interface UserService {
 public class UserServiceImpl implements UserService {
     @Override
     public String createUser(String name) {
-        // Implementation
         return "User created: " + name;
     }
     
     @Override
     public User getUser(int id) {
-        // Implementation
         return new User(id, "Alice");
     }
     
@@ -78,7 +77,7 @@ public class UserServiceImpl implements UserService {
 }
 ```
 
-#### 3. Start the Server (Multi-Service)
+#### 3. Start the Server
 
 ```java
 import org.flossware.jremote.JRemoteServer;
@@ -86,9 +85,8 @@ import org.flossware.jremote.JRemoteServer;
 public class Server {
     public static void main(String[] args) {
         JRemoteServer server = JRemoteServer.builder()
-            .register("users", UserService.class, new UserServiceImpl())
-            .register("orders", OrderService.class, new OrderServiceImpl())
-            .register("payments", PaymentService.class, new PaymentServiceImpl())
+            .registerFactory(UserService.class, UserServiceImpl.class)
+            .registerFactory(OrderService.class, OrderServiceImpl.class)
             .build();
             
         server.start(8080);
@@ -97,38 +95,71 @@ public class Server {
 }
 ```
 
-#### 4. Create a Client (With Connection Pooling)
+#### 4. Create Remote Instances
 
 ```java
 import org.flossware.jremote.JRemoteClient;
 
 public class Client {
     public static void main(String[] args) {
-        // Create client with connection pool (min=2, max=10)
-        try (JRemoteClient client = new JRemoteClient("localhost", 8080, 2, 10)) {
+        try (JRemoteClient client = new JRemoteClient("localhost", 8080)) {
             
-            // Get proxies for different services
-            UserService users = client.getProxy("users", UserService.class);
-            OrderService orders = client.getProxy("orders", OrderService.class);
+            // Create remote instances like "new Foo()"
+            UserService user1 = client.create(UserService.class);
+            UserService user2 = client.create(UserService.class);  // Different instance
             
-            // Make remote calls (connections are pooled and reused)
-            String result = users.createUser("Alice");
+            // Use them
+            String result = user1.createUser("Alice");
             System.out.println(result);
             
-            User user = users.getUser(1);
+            User user = user2.getUser(1);
             System.out.println("Retrieved: " + user.getName());
             
-            orders.createOrder(123);
+            // Explicit cleanup (optional)
+            client.destroy(user1);
             
-            // Connection pool stats
-            System.out.println("Pool size: " + client.getPoolSize());
-            System.out.println("Available: " + client.getAvailableConnections());
-        }
+        }  // user2 auto-destroyed on close
     }
 }
 ```
 
 ## Advanced Usage
+
+### Constructor Arguments
+
+```java
+// Server: register factory
+JRemoteServer server = JRemoteServer.builder()
+    .registerFactory(DatabaseService.class, DatabaseServiceImpl.class)
+    .build();
+
+// Client: create with constructor arguments
+try (JRemoteClient client = new JRemoteClient("localhost", 8080)) {
+    DatabaseService db = client.create(
+        DatabaseService.class, 
+        "jdbc:postgresql://localhost:5432/mydb",  // connection string
+        "username",                               // username
+        "password"                                // password
+    );
+    
+    db.query("SELECT * FROM users");
+}
+```
+
+### Custom Factories
+
+For complex initialization logic, use a Supplier:
+
+```java
+JRemoteServer server = JRemoteServer.builder()
+    .registerFactory(OrderService.class, () -> {
+        OrderServiceImpl service = new OrderServiceImpl();
+        service.setDatabase(dbConnection);
+        service.setLogger(logger);
+        return service;
+    })
+    .build();
+```
 
 ### Connection Pool Configuration
 
@@ -138,48 +169,48 @@ JRemoteClient client = new JRemoteClient("localhost", 8080);
 
 // Custom pool size
 JRemoteClient client = new JRemoteClient("localhost", 8080, 5, 20);
-
-// Pool automatically manages connection lifecycle
-UserService service = client.getProxy("users", UserService.class);
-
-// Connections are reused across multiple calls
-for (int i = 0; i < 1000; i++) {
-    service.createUser("User" + i);  // Same connections reused
-}
 ```
 
-### Single Service Mode (Backward Compatible)
+### Multiple Instances
+
+Each `create()` call creates a new remote instance:
 
 ```java
-// Server
-JRemoteServer server = new JRemoteServer(UserService.class, new UserServiceImpl());
-server.start(8080);
-
-// Client (deprecated, but still works)
-UserService service = JRemoteClient.create(UserService.class, "localhost", 8080);
-service.createUser("Alice");
+try (JRemoteClient client = new JRemoteClient("localhost", 8080)) {
+    UserService user1 = client.create(UserService.class);
+    UserService user2 = client.create(UserService.class);
+    UserService user3 = client.create(UserService.class);
+    
+    // All three are independent instances
+    user1.createUser("Alice");
+    user2.createUser("Bob");
+    user3.createUser("Carol");
+}  // All three auto-destroyed
 ```
 
-### Auto-Generated Service IDs
+### Lifecycle Management
 
 ```java
-JRemoteServer.Builder builder = JRemoteServer.builder();
-
-// Register with custom ID
-builder.register("my-service", UserService.class, new UserServiceImpl());
-
-// Register with auto-generated UUID
-String serviceId = builder.registerWithGeneratedId(OrderService.class, new OrderServiceImpl());
-System.out.println("Service registered with ID: " + serviceId);
-
-JRemoteServer server = builder.build();
+try (JRemoteClient client = new JRemoteClient("localhost", 8080)) {
+    UserService user = client.create(UserService.class);
+    
+    // Use the service
+    user.createUser("Alice");
+    
+    // Explicit cleanup (optional)
+    client.destroy(user);
+    
+    // Create another instance
+    UserService user2 = client.create(UserService.class);
+    
+}  // user2 auto-destroyed on close
 ```
 
 ### Error Handling
 
 ```java
 try (JRemoteClient client = new JRemoteClient("localhost", 8080)) {
-    UserService users = client.getProxy("users", UserService.class);
+    UserService users = client.create(UserService.class);
     
     try {
         users.deleteUser(999);  // Might throw exception
@@ -201,29 +232,48 @@ Client Side                              Server Side
 
 JRemoteClient                            JRemoteServer
     ↓                                         ↓
-ConnectionPool ←→ Socket ←→ Network ←→ Socket ←→ ServiceRegistry
+create(Class)                            Factory Registry
     ↓                                         ↓
-Dynamic Proxy                            Service Lookup
+CREATE_INSTANCE request ────────────→    Create Instance
     ↓                                         ↓
-RemoteInvocation (JSON)                  Method Validation
+Receive objectId ←──────────────────────  Return objectId
     ↓                                         ↓
-Send over wire                           Reflection Invocation
+Create Dynamic Proxy                     Track Instance
     ↓                                         ↓
-Wait for response                        Return result
+proxy.method() ──────────────────────→   Lookup Instance
     ↓                                         ↓
-RemoteResponse (JSON)                    RemoteResponse (JSON)
+METHOD_CALL request                      Invoke Method
     ↓                                         ↓
-Return to caller                         Send over wire
+Receive result ←─────────────────────────  Return Result
+    ↓                                         ↓
+destroy(proxy) ───────────────────────→   Destroy Instance
 ```
+
+### Request Types
+
+**CREATE_INSTANCE**: Create new remote instance
+- Client sends interface name + constructor arguments
+- Server calls factory, generates UUID, returns objectId
+- Client creates proxy with embedded objectId
+
+**METHOD_CALL**: Invoke method on remote instance
+- Client sends objectId + method name + arguments
+- Server routes to instance, validates method, invokes
+- Returns result or error
+
+**DESTROY_INSTANCE**: Destroy remote instance
+- Client sends objectId
+- Server validates ownership, removes instance
 
 ### Components
 
 - **JRemoteClient**: Client-side proxy factory with connection pooling
-- **JRemoteServer**: Server-side request handler with multi-service support
+- **JRemoteServer**: Server-side request handler with factory registry
 - **ConnectionPool**: Thread-safe socket connection pool
-- **ServiceRegistry**: Registry for managing multiple service instances
-- **RemoteInvocation**: JSON-serializable method invocation metadata
-- **RemoteResponse**: JSON-serializable response wrapper (success or error)
+- **ServiceRegistry**: Registry for managing factories and instances
+- **InstanceFactory**: Factory abstraction (reflection or custom Supplier)
+- **RemoteInvocation**: JSON-serializable request wrapper
+- **RemoteResponse**: JSON-serializable response wrapper
 - **RemoteException**: Custom exception preserving remote stack traces
 
 ## Configuration
@@ -246,6 +296,7 @@ Uses SLF4J with Logback. Configure in `logback.xml`:
 - Only methods declared in the registered interface can be invoked
 - Attempts to call non-interface methods are rejected with `SecurityException`
 - JSON serialization prevents deserialization attacks
+- Instance ownership prevents cross-client destruction
 
 ## Version Management
 
@@ -269,20 +320,23 @@ mvn validate
 
 ## Testing
 
-Comprehensive test suite with 56 tests:
+Comprehensive test suite with 60 tests:
 
 ```bash
 mvn test
 ```
 
 **Test coverage includes:**
-- ✅ Multi-service routing and isolation
-- ✅ Connection pool lifecycle (acquire/release/validation)
+- ✅ Factory-based instance creation
+- ✅ Constructor arguments support
+- ✅ Multiple instances of same interface
+- ✅ Instance lifecycle (create/destroy/auto-cleanup)
+- ✅ Connection pool validation
 - ✅ Security validation (interface method whitelist)
+- ✅ Ownership validation (cross-client protection)
 - ✅ Exception propagation with stack traces
 - ✅ JSON serialization/deserialization
 - ✅ Concurrent client access
-- ✅ Backward compatibility
 - ✅ Keep-alive connection reuse
 
 ## Requirements
@@ -310,21 +364,24 @@ mvn test
 - Virtual threads allow thousands of concurrent remote calls
 - Connection pool size configurable based on workload
 - Keep-alive connections reduce per-call overhead
+- Each client manages its own instances independently
 
 ## Limitations & Future Enhancements
 
 **Current limitations:**
 - No built-in load balancing (use external load balancer)
 - No SSL/TLS support (use reverse proxy or VPN)
-- No service discovery (clients must know service IDs)
+- No service discovery (clients must know server address)
 - No heartbeat/ping protocol for connection validation
+- Constructor argument types inferred from values (primitives may need boxing)
 
 **Planned enhancements:**
-- Dynamic service registration/deregistration
-- Built-in service discovery mechanism
+- Dynamic factory registration/deregistration
+- Service discovery mechanism
 - Connection pool metrics and monitoring
 - Configurable serialization (Protobuf, MessagePack)
 - SSL/TLS native support
+- Primitive constructor parameter handling
 
 ## Contributing
 

@@ -4,19 +4,52 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import java.util.Arrays;
 
 /**
- * Encapsulates a method call for remote execution.
- * objectId identifies which service instance to invoke on (null for single-service mode).
+ * Encapsulates a remote invocation request.
+ * Supports method calls, instance creation, and instance destruction.
  */
 public record RemoteInvocation(
+    RequestType requestType,
     String objectId,
+    String interfaceClassName,
     String methodName,
     String[] parameterTypeNames,
     @JsonTypeInfo(use = JsonTypeInfo.Id.CLASS)
     Object[] args
 ) {
-    public RemoteInvocation(String objectId, String methodName, Class<?>[] parameterTypes, Object[] args) {
-        this(
+    /**
+     * Type of remote request.
+     */
+    public enum RequestType {
+        /** Regular method invocation */
+        METHOD_CALL,
+        /** Create new remote instance */
+        CREATE_INSTANCE,
+        /** Destroy remote instance */
+        DESTROY_INSTANCE
+    }
+
+    /**
+     * Full constructor with explicit request type.
+     */
+    public RemoteInvocation {
+        // Default requestType to METHOD_CALL if null (JSON deserialization compatibility)
+        if (requestType == null) {
+            requestType = RequestType.METHOD_CALL;
+        }
+    }
+
+    /**
+     * Create a METHOD_CALL request.
+     */
+    public static RemoteInvocation methodCall(
+            String objectId,
+            String methodName,
+            Class<?>[] parameterTypes,
+            Object[] args) {
+        return new RemoteInvocation(
+            RequestType.METHOD_CALL,
             objectId,
+            null,
             methodName,
             parameterTypes == null ? new String[0] :
                 Arrays.stream(parameterTypes)
@@ -26,11 +59,45 @@ public record RemoteInvocation(
         );
     }
 
-    // Backward-compatible constructor for single-service mode
-    public RemoteInvocation(String methodName, Class<?>[] parameterTypes, Object[] args) {
-        this(null, methodName, parameterTypes, args);
+    /**
+     * Create a CREATE_INSTANCE request.
+     */
+    public static RemoteInvocation createInstance(
+            String clientId,
+            String interfaceClassName,
+            Class<?>[] constructorParamTypes,
+            Object[] constructorArgs) {
+        return new RemoteInvocation(
+            RequestType.CREATE_INSTANCE,
+            clientId,  // Reuse objectId field for clientId
+            interfaceClassName,
+            null,
+            constructorParamTypes == null ? new String[0] :
+                Arrays.stream(constructorParamTypes)
+                    .map(Class::getName)
+                    .toArray(String[]::new),
+            constructorArgs
+        );
     }
 
+    /**
+     * Create a DESTROY_INSTANCE request.
+     */
+    public static RemoteInvocation destroyInstance(String clientId, String objectIdToDestroy) {
+        return new RemoteInvocation(
+            RequestType.DESTROY_INSTANCE,
+            objectIdToDestroy,
+            clientId,  // Reuse interfaceClassName field for clientId
+            null,
+            new String[0],
+            new Object[0]
+        );
+    }
+
+    /**
+     * Get parameter types as Class[] array.
+     * Reconstructs from String[] names.
+     */
     public Class<?>[] getParameterTypes() throws ClassNotFoundException {
         if (parameterTypeNames == null || parameterTypeNames.length == 0) {
             return new Class<?>[0];

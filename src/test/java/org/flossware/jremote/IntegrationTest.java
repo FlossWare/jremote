@@ -12,8 +12,9 @@ class IntegrationTest {
 
     @BeforeAll
     static void startServer() throws Exception {
-        TestService implementation = new TestServiceImpl();
-        server = new JRemoteServer(TestService.class, implementation);
+        server = JRemoteServer.builder()
+            .registerFactory(TestService.class, TestServiceImpl.class)
+            .build();
 
         serverThread = Thread.ofVirtual().start(() ->
             server.start(TEST_PORT)
@@ -31,122 +32,108 @@ class IntegrationTest {
 
     @Test
     void testRemoteMethodInvocation() {
-        TestService client = JRemoteClient.create(
-            TestService.class,
-            "localhost",
-            TEST_PORT
-        );
+        try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
+            TestService service = client.create(TestService.class);
 
-        String result = client.echo("Hello");
-        assertEquals("Echo: Hello", result);
+            String result = service.echo("Hello");
+            assertEquals("Echo: Hello", result);
+        }
     }
 
     @Test
     void testRemoteAddition() {
-        TestService client = JRemoteClient.create(
-            TestService.class,
-            "localhost",
-            TEST_PORT
-        );
+        try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
+            TestService service = client.create(TestService.class);
 
-        int result = client.add(5, 3);
-        assertEquals(8, result);
+            int result = service.add(5, 3);
+            assertEquals(8, result);
+        }
     }
 
     @Test
     void testVoidMethod() {
-        TestService client = JRemoteClient.create(
-            TestService.class,
-            "localhost",
-            TEST_PORT
-        );
+        try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
+            TestService service = client.create(TestService.class);
 
-        assertDoesNotThrow(() -> client.voidMethod());
+            assertDoesNotThrow(() -> service.voidMethod());
+        }
     }
 
     @Test
     void testNullReturnValue() {
-        TestService client = JRemoteClient.create(
-            TestService.class,
-            "localhost",
-            TEST_PORT
-        );
+        try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
+            TestService service = client.create(TestService.class);
 
-        Object result = client.getNullValue();
-        assertNull(result);
+            Object result = service.getNullValue();
+            assertNull(result);
+        }
     }
 
     @Test
     void testExceptionPropagation() {
-        TestService client = JRemoteClient.create(
-            TestService.class,
-            "localhost",
-            TEST_PORT
-        );
+        try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
+            TestService service = client.create(TestService.class);
 
-        RemoteException exception = assertThrows(
-            RemoteException.class,
-            () -> client.throwsException()
-        );
+            RemoteException exception = assertThrows(
+                RemoteException.class,
+                () -> service.throwsException()
+            );
 
-        assertEquals("java.lang.IllegalStateException", exception.getOriginalExceptionType());
-        assertEquals("Test exception", exception.getOriginalMessage());
+            assertEquals("java.lang.IllegalStateException", exception.getOriginalExceptionType());
+            assertEquals("Test exception", exception.getOriginalMessage());
+        }
     }
 
     @Test
     void testMultipleSequentialCalls() {
-        TestService client = JRemoteClient.create(
-            TestService.class,
-            "localhost",
-            TEST_PORT
-        );
+        try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
+            TestService service = client.create(TestService.class);
 
-        assertEquals("Echo: First", client.echo("First"));
-        assertEquals("Echo: Second", client.echo("Second"));
-        assertEquals(10, client.add(7, 3));
-        assertNull(client.getNullValue());
+            assertEquals("Echo: First", service.echo("First"));
+            assertEquals("Echo: Second", service.echo("Second"));
+            assertEquals(10, service.add(7, 3));
+            assertNull(service.getNullValue());
+        }
+    }
+
+    @Test
+    void testMultipleInstances() {
+        try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
+            TestService service1 = client.create(TestService.class);
+            TestService service2 = client.create(TestService.class);
+
+            assertEquals("Echo: First", service1.echo("First"));
+            assertEquals("Echo: Second", service2.echo("Second"));
+
+            // Each instance should work independently
+            assertNotNull(service1);
+            assertNotNull(service2);
+        }
+    }
+
+    @Test
+    void testExplicitDestroy() {
+        try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
+            TestService service = client.create(TestService.class);
+
+            assertEquals("Echo: Test", service.echo("Test"));
+
+            // Destroy instance
+            client.destroy(service);
+
+            // After destruction, the proxy should not be in tracking map
+            assertThrows(IllegalArgumentException.class, () -> client.destroy(service));
+        }
     }
 
     @Test
     void testClientToStringMethod() {
-        TestService client = JRemoteClient.create(
-            TestService.class,
-            "localhost",
-            TEST_PORT
-        );
+        try (JRemoteClient client = new JRemoteClient("localhost", TEST_PORT)) {
+            TestService service = client.create(TestService.class);
 
-        String toString = client.toString();
-        assertTrue(toString.contains("TestService"));
-        assertTrue(toString.contains("localhost"));
-        assertTrue(toString.contains(String.valueOf(TEST_PORT)));
-    }
-
-    @Test
-    void testClientHashCodeMethod() {
-        TestService client = JRemoteClient.create(
-            TestService.class,
-            "localhost",
-            TEST_PORT
-        );
-
-        int hashCode = client.hashCode();
-        assertNotEquals(0, hashCode);
-    }
-
-    @Test
-    void testClientEqualsMethod() {
-        TestService client1 = JRemoteClient.create(
-            TestService.class,
-            "localhost",
-            TEST_PORT
-        );
-        TestService client2 = JRemoteClient.create(
-            TestService.class,
-            "localhost",
-            TEST_PORT
-        );
-
-        assertEquals(client1, client1);
-        assertNotEquals(client1, client2);
+            String toString = service.toString();
+            assertTrue(toString.contains("TestService"));
+            assertTrue(toString.contains("proxy"));
+        }
     }
 }

@@ -6,99 +6,184 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class ServiceRegistryTest {
     private ServiceRegistry registry;
-    private TestService testImpl;
 
     @BeforeEach
     void setUp() {
         registry = new ServiceRegistry();
-        testImpl = new TestServiceImpl();
     }
 
     @Test
-    void testRegisterService() {
-        ServiceRegistry result = registry.register("test", TestService.class, testImpl);
+    void testRegisterFactory() {
+        ServiceRegistry result = registry.registerFactory(TestService.class, TestServiceImpl.class);
 
         assertSame(registry, result);
-        assertTrue(registry.contains("test"));
-        assertEquals(1, registry.size());
+        assertEquals(1, registry.factoryCount());
     }
 
     @Test
-    void testGetRegisteredService() {
-        registry.register("test", TestService.class, testImpl);
+    void testRegisterCustomFactory() {
+        ServiceRegistry result = registry.registerFactory(
+            TestService.class,
+            () -> new TestServiceImpl()
+        );
 
-        ServiceDescriptor descriptor = registry.get("test");
-
-        assertNotNull(descriptor);
-        assertEquals("test", descriptor.id());
-        assertEquals(TestService.class, descriptor.serviceInterface());
-        assertSame(testImpl, descriptor.implementation());
-        assertNotNull(descriptor.allowedMethods());
-        assertFalse(descriptor.allowedMethods().isEmpty());
+        assertSame(registry, result);
+        assertEquals(1, registry.factoryCount());
     }
 
     @Test
-    void testGetNonExistentService() {
-        ServiceDescriptor descriptor = registry.get("nonexistent");
-        assertNull(descriptor);
-    }
-
-    @Test
-    void testRegisterDuplicateId() {
-        registry.register("test", TestService.class, testImpl);
+    void testRegisterDuplicateFactory() {
+        registry.registerFactory(TestService.class, TestServiceImpl.class);
 
         assertThrows(IllegalArgumentException.class, () ->
-            registry.register("test", TestService.class, new TestServiceImpl())
+            registry.registerFactory(TestService.class, TestServiceImpl.class)
         );
     }
 
     @Test
-    void testRegisterWithGeneratedId() {
-        String id1 = registry.registerWithGeneratedId(TestService.class, testImpl);
-        String id2 = registry.registerWithGeneratedId(TestService.class, new TestServiceImpl());
+    void testRegisterMultipleFactories() {
+        registry.registerFactory(TestService.class, TestServiceImpl.class);
+        registry.registerFactory(OrderService.class, OrderServiceImpl.class);
 
-        assertNotNull(id1);
-        assertNotNull(id2);
-        assertNotEquals(id1, id2);
-        assertTrue(registry.contains(id1));
-        assertTrue(registry.contains(id2));
+        assertEquals(2, registry.factoryCount());
+    }
+
+    @Test
+    void testCreateInstance() {
+        registry.registerFactory(TestService.class, TestServiceImpl.class);
+
+        String objectId = registry.createInstance(
+            TestService.class.getName(),
+            "client1",
+            null,
+            null
+        );
+
+        assertNotNull(objectId);
+        assertTrue(registry.contains(objectId));
+        assertEquals(1, registry.size());
+    }
+
+    @Test
+    void testCreateInstanceWithConstructorArgs() {
+        registry.registerFactory(OrderService.class, OrderServiceImpl.class);
+
+        String objectId = registry.createInstance(
+            OrderService.class.getName(),
+            "client1",
+            new Class<?>[0],
+            new Object[0]
+        );
+
+        assertNotNull(objectId);
+        assertTrue(registry.contains(objectId));
+    }
+
+    @Test
+    void testCreateMultipleInstances() {
+        registry.registerFactory(TestService.class, TestServiceImpl.class);
+
+        String objectId1 = registry.createInstance(
+            TestService.class.getName(),
+            "client1",
+            null,
+            null
+        );
+
+        String objectId2 = registry.createInstance(
+            TestService.class.getName(),
+            "client1",
+            null,
+            null
+        );
+
+        assertNotEquals(objectId1, objectId2);
         assertEquals(2, registry.size());
     }
 
     @Test
-    void testGenerateId() {
-        String id1 = registry.generateId();
-        String id2 = registry.generateId();
+    void testDestroyInstance() {
+        registry.registerFactory(TestService.class, TestServiceImpl.class);
 
-        assertNotNull(id1);
-        assertNotNull(id2);
-        assertNotEquals(id1, id2);
+        String objectId = registry.createInstance(
+            TestService.class.getName(),
+            "client1",
+            null,
+            null
+        );
+
+        assertTrue(registry.contains(objectId));
+
+        registry.destroyInstance(objectId, "client1");
+
+        assertFalse(registry.contains(objectId));
+        assertEquals(0, registry.size());
     }
 
     @Test
-    void testContains() {
-        assertFalse(registry.contains("test"));
+    void testDestroyInstanceOwnershipValidation() {
+        registry.registerFactory(TestService.class, TestServiceImpl.class);
 
-        registry.register("test", TestService.class, testImpl);
+        String objectId = registry.createInstance(
+            TestService.class.getName(),
+            "client1",
+            null,
+            null
+        );
 
-        assertTrue(registry.contains("test"));
-        assertFalse(registry.contains("other"));
+        // Different client cannot destroy instance
+        assertThrows(SecurityException.class, () ->
+            registry.destroyInstance(objectId, "client2")
+        );
     }
 
     @Test
-    void testMultipleServices() {
-        registry.register("service1", TestService.class, testImpl);
-        registry.register("service2", TestService.class, new TestServiceImpl());
+    void testCleanupClient() {
+        registry.registerFactory(TestService.class, TestServiceImpl.class);
+
+        String objectId1 = registry.createInstance(
+            TestService.class.getName(),
+            "client1",
+            null,
+            null
+        );
+
+        String objectId2 = registry.createInstance(
+            TestService.class.getName(),
+            "client1",
+            null,
+            null
+        );
 
         assertEquals(2, registry.size());
-        assertTrue(registry.contains("service1"));
-        assertTrue(registry.contains("service2"));
 
-        ServiceDescriptor desc1 = registry.get("service1");
-        ServiceDescriptor desc2 = registry.get("service2");
+        registry.cleanupClient("client1");
 
-        assertNotNull(desc1);
-        assertNotNull(desc2);
-        assertNotSame(desc1.implementation(), desc2.implementation());
+        assertEquals(0, registry.size());
+        assertFalse(registry.contains(objectId1));
+        assertFalse(registry.contains(objectId2));
+    }
+
+    @Test
+    void testCreateInstanceNoFactory() {
+        assertThrows(IllegalArgumentException.class, () ->
+            registry.createInstance(
+                TestService.class.getName(),
+                "client1",
+                null,
+                null
+            )
+        );
+    }
+
+    @Test
+    void testNullValidation() {
+        assertThrows(IllegalArgumentException.class, () ->
+            registry.registerFactory(null, TestServiceImpl.class)
+        );
+
+        assertThrows(IllegalArgumentException.class, () ->
+            registry.registerFactory(TestService.class, (Class<TestServiceImpl>) null)
+        );
     }
 }
