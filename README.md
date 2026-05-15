@@ -24,7 +24,7 @@ A production-ready Java 21 Remote Procedure Call framework with factory-based in
 ### Development Experience
 - ✅ **Intuitive API**: Works like `new Foo()` instead of string-based lookup
 - ✅ **Auto-Closeable**: try-with-resources support with automatic cleanup
-- ✅ **Comprehensive Tests**: 60 tests with 100% pass rate
+- ✅ **Comprehensive Tests**: 75 tests with 100% pass rate
 - ✅ **CI/CD Ready**: Automated versioning and deployment
 
 ## Quick Start
