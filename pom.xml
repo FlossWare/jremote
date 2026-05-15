@@ -6,7 +6,7 @@
 
     <groupId>org.flossware</groupId>
     <artifactId>jremote</artifactId>
-    <version>1.2</version>
+    <version>1.10</version>
     <packaging>jar</packaging>
 
     <name>jremote</name>
