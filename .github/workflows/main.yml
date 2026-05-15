@@ -65,4 +65,4 @@ jobs:
         run: "mvn -DskipTests deploy"
 
       - name: Checkin and tag to github
-        run: "mvn scm:checkin scm:tag"
+        run: "mvn scm:checkin -Dmessage='chore: bump version to ${project.version}' scm:tag"
