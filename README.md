@@ -1,4 +1,4 @@
-# FlossWare jremote
+# jremote
 
 A production-ready Java 21 Universal Remote Invocation framework with multi-service support and connection pooling. Built on Virtual Threads for high-scalability distributed computing.
 
