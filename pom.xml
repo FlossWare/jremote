@@ -9,7 +9,7 @@
     <version>1.0</version>
     <packaging>jar</packaging>
 
-    <name>FlossWare jRemote</name>
+    <name>FlossWare jremote</name>
     <description>Universal Remote Invocation via Java 21 Virtual Threads</description>
 
     <scm>
