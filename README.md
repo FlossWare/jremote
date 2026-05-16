@@ -12,10 +12,11 @@ A production-ready Java 21 Remote Procedure Call framework with factory-based in
 - ✅ **Type-Safe**: Full compile-time type safety with generics
 - ✅ **Keep-Alive**: Persistent connections for reduced latency
 - ✅ **Constructor Arguments**: Support for parameterized constructors
+- ✅ **Multi-Format Serialization**: Choose between JSON, XML, YAML, or MessagePack
 
 ### Security & Reliability
 - ✅ **Interface Validation**: Only methods declared in service interfaces can be invoked
-- ✅ **JSON Serialization**: Secure Jackson-based serialization (no Java serialization vulnerabilities)
+- ✅ **Secure Serialization**: Jackson-based serialization (no Java serialization vulnerabilities)
 - ✅ **Error Handling**: Comprehensive exception propagation with stack traces
 - ✅ **Logging**: SLF4J + Logback for production observability
 - ✅ **Thread-Safe**: Concurrent access supported via ConcurrentHashMap and BlockingQueue
@@ -24,7 +25,7 @@ A production-ready Java 21 Remote Procedure Call framework with factory-based in
 ### Development Experience
 - ✅ **Intuitive API**: Works like `new Foo()` instead of string-based lookup
 - ✅ **Auto-Closeable**: try-with-resources support with automatic cleanup
-- ✅ **Comprehensive Tests**: 75 tests with 100% pass rate
+- ✅ **Comprehensive Tests**: 91 tests covering all features
 - ✅ **CI/CD Ready**: Automated versioning and deployment
 
 ## Quick Start
@@ -170,6 +171,38 @@ JRemoteClient client = new JRemoteClient("localhost", 8080);
 // Custom pool size
 JRemoteClient client = new JRemoteClient("localhost", 8080, 5, 20);
 ```
+
+### Serialization Formats
+
+jremote supports multiple serialization formats. Clients can choose the format that best fits their needs:
+
+```java
+import org.flossware.jremote.SerializationFormat;
+
+// JSON (default - human-readable, widely supported)
+JRemoteClient jsonClient = new JRemoteClient("localhost", 8080);
+// or explicitly
+JRemoteClient jsonClient = new JRemoteClient("localhost", 8080, SerializationFormat.JSON);
+
+// XML (enterprise integration standard)
+JRemoteClient xmlClient = new JRemoteClient("localhost", 8080, SerializationFormat.XML);
+
+// YAML (human-readable, configuration-friendly)
+JRemoteClient yamlClient = new JRemoteClient("localhost", 8080, SerializationFormat.YAML);
+
+// MessagePack (compact binary format for performance)
+JRemoteClient msgpackClient = new JRemoteClient("localhost", 8080, SerializationFormat.MESSAGEPACK);
+```
+
+**Format Selection:**
+- Server auto-detects format from each client message
+- Multiple clients with different formats can connect simultaneously
+- JSON is the default for backward compatibility
+- Each format has trade-offs:
+  - **JSON**: Best compatibility, human-readable, moderate performance
+  - **XML**: Enterprise standard, verbose but widely supported
+  - **YAML**: Most human-readable, good for debugging
+  - **MessagePack**: Most compact, best performance, not human-readable
 
 ### Multiple Instances
 
@@ -320,7 +353,7 @@ mvn validate
 
 ## Testing
 
-Comprehensive test suite with 60 tests:
+Comprehensive test suite with 91 tests:
 
 ```bash
 mvn test
@@ -329,6 +362,7 @@ mvn test
 **Test coverage includes:**
 - ✅ Factory-based instance creation
 - ✅ Constructor arguments support
+- ✅ Multi-format serialization (JSON, XML, YAML, MessagePack)
 - ✅ Multiple instances of same interface
 - ✅ Instance lifecycle (create/destroy/auto-cleanup)
 - ✅ Connection pool validation
@@ -346,7 +380,8 @@ mvn test
 
 ## Dependencies
 
-- Jackson 2.17.0 (JSON serialization)
+- Jackson 2.17.0 (JSON, XML, YAML serialization)
+- MessagePack 0.9.8 (Binary serialization)
 - SLF4J 2.0.12 (Logging API)
 - Logback 1.5.3 (Logging implementation)
 - JUnit 5.10.2 (Testing)
