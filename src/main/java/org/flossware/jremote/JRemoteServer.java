@@ -2,7 +2,6 @@ package org.flossware.jremote;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.InputStreamReader;
@@ -18,8 +17,6 @@ import java.util.function.Supplier;
  */
 public class JRemoteServer {
     private static final Logger logger = LoggerFactory.getLogger(JRemoteServer.class);
-    private static final ObjectMapper objectMapper = new ObjectMapper()
-        .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     private final ServiceRegistry registry;
 
@@ -77,25 +74,31 @@ public class JRemoteServer {
 
             // Keep-alive: process multiple requests on same connection
             while (!Thread.currentThread().isInterrupted()) {
-                String requestJson = reader.readLine();
-                if (requestJson == null) {
+                String requestLine = reader.readLine();
+                if (requestLine == null || requestLine.isEmpty()) {
                     logger.debug("Client closed connection: {}", clientAddress);
                     break;
                 }
 
-                logger.debug("Received request from {}: {}", clientAddress, requestJson);
-
                 try {
-                    RemoteInvocation invocation = objectMapper.readValue(
-                        requestJson,
-                        RemoteInvocation.class
-                    );
+                    // Auto-detect format from first character (format marker)
+                    char formatMarker = requestLine.charAt(0);
+                    SerializationFormat format = SerializationFormat.fromMarker((byte) formatMarker);
+                    SerializationStrategy strategy = SerializationStrategyFactory.getStrategy(format);
 
-                    processInvocation(invocation, writer);
+                    // Strip format marker and deserialize
+                    String requestData = requestLine.substring(1);
+                    logger.debug("Received {} request from {}: {}", format, clientAddress, requestData);
+
+                    RemoteInvocation invocation = strategy.deserialize(requestData, RemoteInvocation.class);
+
+                    processInvocation(invocation, writer, strategy);
 
                 } catch (Exception e) {
                     logger.error("Error processing request from {}", clientAddress, e);
-                    sendErrorResponse(writer, e);
+                    // Use JSON for error response (fallback)
+                    SerializationStrategy jsonStrategy = SerializationStrategyFactory.getStrategy(SerializationFormat.JSON);
+                    sendErrorResponse(writer, e, jsonStrategy);
                 }
             }
 
@@ -108,15 +111,17 @@ public class JRemoteServer {
         }
     }
 
-    private void processInvocation(RemoteInvocation invocation, BufferedWriter writer) throws Exception {
+    private void processInvocation(RemoteInvocation invocation, BufferedWriter writer,
+                                   SerializationStrategy strategy) throws Exception {
         switch (invocation.requestType()) {
-            case CREATE_INSTANCE -> handleCreateInstance(invocation, writer);
-            case DESTROY_INSTANCE -> handleDestroyInstance(invocation, writer);
-            case METHOD_CALL -> handleMethodCall(invocation, writer);
+            case CREATE_INSTANCE -> handleCreateInstance(invocation, writer, strategy);
+            case DESTROY_INSTANCE -> handleDestroyInstance(invocation, writer, strategy);
+            case METHOD_CALL -> handleMethodCall(invocation, writer, strategy);
         }
     }
 
-    private void handleCreateInstance(RemoteInvocation invocation, BufferedWriter writer) throws Exception {
+    private void handleCreateInstance(RemoteInvocation invocation, BufferedWriter writer,
+                                      SerializationStrategy strategy) throws Exception {
         String interfaceName = invocation.interfaceClassName();
         String clientId = invocation.objectId();  // Reused for clientId
 
@@ -134,7 +139,8 @@ public class JRemoteServer {
 
             // Send success response with objectId
             RemoteResponse response = RemoteResponse.success(objectId, String.class);
-            writer.write(objectMapper.writeValueAsString(response));
+            writer.write((char) strategy.getFormat().getMarker());
+            writer.write(strategy.serialize(response));
             writer.newLine();
             writer.flush();
 
@@ -143,11 +149,12 @@ public class JRemoteServer {
 
         } catch (Exception e) {
             logger.error("Failed to create instance of {}", interfaceName, e);
-            sendErrorResponse(writer, e);
+            sendErrorResponse(writer, e, strategy);
         }
     }
 
-    private void handleDestroyInstance(RemoteInvocation invocation, BufferedWriter writer) throws Exception {
+    private void handleDestroyInstance(RemoteInvocation invocation, BufferedWriter writer,
+                                       SerializationStrategy strategy) throws Exception {
         String objectId = invocation.objectId();
         String clientId = invocation.interfaceClassName();  // Reused for clientId
 
@@ -156,7 +163,8 @@ public class JRemoteServer {
 
             // Send success response
             RemoteResponse response = RemoteResponse.success(null, Void.class);
-            writer.write(objectMapper.writeValueAsString(response));
+            writer.write((char) strategy.getFormat().getMarker());
+            writer.write(strategy.serialize(response));
             writer.newLine();
             writer.flush();
 
@@ -164,11 +172,12 @@ public class JRemoteServer {
 
         } catch (Exception e) {
             logger.error("Failed to destroy instance {}", objectId, e);
-            sendErrorResponse(writer, e);
+            sendErrorResponse(writer, e, strategy);
         }
     }
 
-    private void handleMethodCall(RemoteInvocation invocation, BufferedWriter writer) throws Exception {
+    private void handleMethodCall(RemoteInvocation invocation, BufferedWriter writer,
+                                  SerializationStrategy strategy) throws Exception {
         // Get object ID
         String objectId = invocation.objectId();
         if (objectId == null || objectId.isBlank()) {
@@ -180,7 +189,8 @@ public class JRemoteServer {
                     new StackTraceElement[0]
                 )
             );
-            writer.write(objectMapper.writeValueAsString(errorResponse));
+            writer.write((char) strategy.getFormat().getMarker());
+            writer.write(strategy.serialize(errorResponse));
             writer.newLine();
             writer.flush();
             return;
@@ -197,7 +207,8 @@ public class JRemoteServer {
                     new StackTraceElement[0]
                 )
             );
-            writer.write(objectMapper.writeValueAsString(errorResponse));
+            writer.write((char) strategy.getFormat().getMarker());
+            writer.write(strategy.serialize(errorResponse));
             writer.newLine();
             writer.flush();
             return;
@@ -220,7 +231,8 @@ public class JRemoteServer {
                 )
             );
 
-            writer.write(objectMapper.writeValueAsString(errorResponse));
+            writer.write((char) strategy.getFormat().getMarker());
+            writer.write(strategy.serialize(errorResponse));
             writer.newLine();
             writer.flush();
             return;
@@ -236,14 +248,15 @@ public class JRemoteServer {
 
         // Send success response
         RemoteResponse response = RemoteResponse.success(result, method.getReturnType());
-        writer.write(objectMapper.writeValueAsString(response));
+        writer.write((char) strategy.getFormat().getMarker());
+        writer.write(strategy.serialize(response));
         writer.newLine();
         writer.flush();
 
         logger.debug("Successfully processed method: {} on service {}", invocation.methodName(), objectId);
     }
 
-    private void sendErrorResponse(BufferedWriter writer, Exception e) {
+    private void sendErrorResponse(BufferedWriter writer, Exception e, SerializationStrategy strategy) {
         try {
             Throwable actualException = e;
             if (e instanceof java.lang.reflect.InvocationTargetException ite) {
@@ -253,7 +266,8 @@ public class JRemoteServer {
             RemoteResponse errorResponse = RemoteResponse.failure(
                 RemoteException.fromThrowable(actualException)
             );
-            writer.write(objectMapper.writeValueAsString(errorResponse));
+            writer.write((char) strategy.getFormat().getMarker());
+            writer.write(strategy.serialize(errorResponse));
             writer.newLine();
             writer.flush();
         } catch (Exception writeError) {

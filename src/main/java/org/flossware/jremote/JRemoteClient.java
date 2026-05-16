@@ -2,7 +2,6 @@ package org.flossware.jremote;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -25,31 +24,46 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class JRemoteClient implements AutoCloseable {
     private static final Logger logger = LoggerFactory.getLogger(JRemoteClient.class);
-    private static final ObjectMapper objectMapper = new ObjectMapper()
-        .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     private final ConnectionPool connectionPool;
     private final String clientId;
     private final Map<Object, String> proxyToObjectId;
+    private final SerializationStrategy serializationStrategy;
     private volatile boolean closed = false;
 
     /**
-     * Create client with default connection pool (min=1, max=10).
+     * Create client with default connection pool (min=1, max=10) and JSON format.
      */
     public JRemoteClient(String host, int port) {
-        this(host, port, 1, 10);
+        this(host, port, 1, 10, SerializationFormat.JSON);
     }
 
     /**
-     * Create client with custom connection pool configuration.
+     * Create client with default connection pool and specified format.
+     */
+    public JRemoteClient(String host, int port, SerializationFormat format) {
+        this(host, port, 1, 10, format);
+    }
+
+    /**
+     * Create client with custom connection pool configuration and JSON format.
      */
     public JRemoteClient(String host, int port, int minConnections, int maxConnections) {
+        this(host, port, minConnections, maxConnections, SerializationFormat.JSON);
+    }
+
+    /**
+     * Create client with custom connection pool configuration and specified format.
+     */
+    public JRemoteClient(String host, int port, int minConnections, int maxConnections,
+                         SerializationFormat format) {
         this.connectionPool = new ConnectionPool(host, port, minConnections, maxConnections);
         this.clientId = UUID.randomUUID().toString();
         this.proxyToObjectId = new ConcurrentHashMap<>();
+        this.serializationStrategy = SerializationStrategyFactory.getStrategy(format);
 
-        logger.info("JRemoteClient created for {}:{} (clientId: {})",
-                   host, port, clientId);
+        logger.info("JRemoteClient created for {}:{} (clientId: {}, format: {})",
+                   host, port, clientId, format);
     }
 
     /**
@@ -96,16 +110,17 @@ public class JRemoteClient implements AutoCloseable {
                 args
             );
 
-            String requestJson = objectMapper.writeValueAsString(createRequest);
-            logger.debug("Sending CREATE_INSTANCE request: {}", requestJson);
+            String requestData = serializationStrategy.serialize(createRequest);
+            logger.debug("Sending CREATE_INSTANCE request: {}", requestData);
 
-            writer.write(requestJson);
+            writer.write((char) serializationStrategy.getFormat().getMarker());
+            writer.write(requestData);
             writer.newLine();
             writer.flush();
 
             // Receive objectId response
-            String responseJson = reader.readLine();
-            if (responseJson == null) {
+            String responseLine = reader.readLine();
+            if (responseLine == null || responseLine.isEmpty()) {
                 throw new RemoteException(
                     "ConnectionException",
                     "Connection closed while creating instance",
@@ -113,9 +128,11 @@ public class JRemoteClient implements AutoCloseable {
                 );
             }
 
-            logger.debug("Received response: {}", responseJson);
+            // Strip format marker and deserialize
+            String responseData = responseLine.substring(1);
+            logger.debug("Received response: {}", responseData);
 
-            RemoteResponse response = objectMapper.readValue(responseJson, RemoteResponse.class);
+            RemoteResponse response = serializationStrategy.deserialize(responseData, RemoteResponse.class);
 
             if (!response.isSuccess()) {
                 throw response.error();
@@ -184,17 +201,19 @@ public class JRemoteClient implements AutoCloseable {
             // Send DESTROY_INSTANCE request
             RemoteInvocation destroyRequest = RemoteInvocation.destroyInstance(clientId, objectId);
 
-            String requestJson = objectMapper.writeValueAsString(destroyRequest);
-            logger.debug("Sending DESTROY_INSTANCE request: {}", requestJson);
+            String requestData = serializationStrategy.serialize(destroyRequest);
+            logger.debug("Sending DESTROY_INSTANCE request: {}", requestData);
 
-            writer.write(requestJson);
+            writer.write((char) serializationStrategy.getFormat().getMarker());
+            writer.write(requestData);
             writer.newLine();
             writer.flush();
 
             // Read response
-            String responseJson = reader.readLine();
-            if (responseJson != null) {
-                RemoteResponse response = objectMapper.readValue(responseJson, RemoteResponse.class);
+            String responseLine = reader.readLine();
+            if (responseLine != null && !responseLine.isEmpty()) {
+                String responseData = responseLine.substring(1);
+                RemoteResponse response = serializationStrategy.deserialize(responseData, RemoteResponse.class);
                 if (!response.isSuccess()) {
                     logger.warn("Failed to destroy instance {}: {}",
                                objectId, response.error().getMessage());
@@ -236,9 +255,10 @@ public class JRemoteClient implements AutoCloseable {
                 var writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
 
                 RemoteInvocation destroyRequest = RemoteInvocation.destroyInstance(clientId, objectId);
-                String requestJson = objectMapper.writeValueAsString(destroyRequest);
+                String requestData = serializationStrategy.serialize(destroyRequest);
 
-                writer.write(requestJson);
+                writer.write((char) serializationStrategy.getFormat().getMarker());
+                writer.write(requestData);
                 writer.newLine();
                 writer.flush();
 
@@ -306,16 +326,17 @@ public class JRemoteClient implements AutoCloseable {
                     args
                 );
 
-                String requestJson = objectMapper.writeValueAsString(invocation);
-                logger.debug("Sending method call: {}", requestJson);
+                String requestData = serializationStrategy.serialize(invocation);
+                logger.debug("Sending method call: {}", requestData);
 
-                writer.write(requestJson);
+                writer.write((char) serializationStrategy.getFormat().getMarker());
+                writer.write(requestData);
                 writer.newLine();
                 writer.flush();
 
                 // Read response
-                String responseJson = reader.readLine();
-                if (responseJson == null) {
+                String responseLine = reader.readLine();
+                if (responseLine == null || responseLine.isEmpty()) {
                     throw new RemoteException(
                         "ConnectionException",
                         "Connection closed by server",
@@ -323,9 +344,11 @@ public class JRemoteClient implements AutoCloseable {
                     );
                 }
 
-                logger.debug("Received response: {}", responseJson);
+                // Strip format marker and deserialize
+                String responseData = responseLine.substring(1);
+                logger.debug("Received response: {}", responseData);
 
-                RemoteResponse response = objectMapper.readValue(responseJson, RemoteResponse.class);
+                RemoteResponse response = serializationStrategy.deserialize(responseData, RemoteResponse.class);
 
                 if (response.isSuccess()) {
                     return response.result();
